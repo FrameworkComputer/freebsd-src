@@ -48,6 +48,9 @@
 #define	HSCTRL_MAP(usage, code)	\
 	{ HIDMAP_KEY(HUP_GENERIC_DESKTOP, HUG_SYSTEM_##usage, code) }
 
+#define	HRADIO_MAP(usage, code)	\
+	{ HIDMAP_KEY(HUP_GENERIC_DESKTOP, HUG_SYSTEM_##usage, code) }
+
 static const struct hidmap_item hsctrl_map[] = {
 	HSCTRL_MAP(POWER_DOWN,		KEY_POWER),
 	HSCTRL_MAP(SLEEP,		KEY_SLEEP),
@@ -64,10 +67,12 @@ static const struct hidmap_item hsctrl_map[] = {
 	HSCTRL_MAP(MENU_DOWN,		KEY_DOWN),
 	HSCTRL_MAP(POWER_UP,		KEY_POWER2),
 	HSCTRL_MAP(RESTART,		KEY_RESTART),
+	HRADIO_MAP(BUTTON, 		KEY_CONTEXT_MENU),
 };
 
 static const struct hid_device_id hsctrl_devs[] = {
 	{ HID_TLC(HUP_GENERIC_DESKTOP, HUG_SYSTEM_CONTROL) },
+	{ HID_TLC(HUP_GENERIC_DESKTOP, HUG_RADIO_CONTROL) },
 };
 
 static int
