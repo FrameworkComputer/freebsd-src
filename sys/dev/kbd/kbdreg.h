@@ -31,7 +31,7 @@
 
 #ifdef _KERNEL
 
-#include "opt_kbd.h"			/* KBD_DELAY* */
+// #include "opt_kbd.h"			/* KBD_DELAY* */
 
 /* forward declarations */
 typedef struct keyboard keyboard_t;
