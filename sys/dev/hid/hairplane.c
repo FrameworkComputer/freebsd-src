@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  *
  * Copyright (c) 2020 Vladimir Kondratyev <wulf@FreeBSD.org>
+ * Copyright (c) 2024 Framework Computer Inc
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -49,28 +50,10 @@
 #define HUG_RADIO_CONTROL       0x000c
 #define HUG_RADIO_BUTTON        0x00c6
 
-#define	HSCTRL_MAP(usage, code)	\
-	{ HIDMAP_KEY(HUP_GENERIC_DESKTOP, HUG_SYSTEM_##usage, code) }
-
 #define	HRADIO_MAP(usage, code)	\
 	{ HIDMAP_KEY(HUP_GENERIC_DESKTOP, HUG_RADIO_##usage, code) }
 
 static const struct hidmap_item hairplane_map[] = {
-	//HSCTRL_MAP(POWER_DOWN,		KEY_POWER),
-	//HSCTRL_MAP(SLEEP,		KEY_SLEEP),
-	//HSCTRL_MAP(WAKEUP,		KEY_WAKEUP),
-	//HSCTRL_MAP(CONTEXT_MENU,	KEY_CONTEXT_MENU),
-	//HSCTRL_MAP(MAIN_MENU,		KEY_MENU),
-	//HSCTRL_MAP(APP_MENU,		KEY_PROG1),
-	//HSCTRL_MAP(MENU_HELP,		KEY_HELP),
-	//HSCTRL_MAP(MENU_EXIT,		KEY_EXIT),
-	//HSCTRL_MAP(MENU_SELECT,		KEY_SELECT),
-	//HSCTRL_MAP(MENU_RIGHT,		KEY_RIGHT),
-	//HSCTRL_MAP(MENU_LEFT,		KEY_LEFT),
-	//HSCTRL_MAP(MENU_UP,		KEY_UP),
-	//HSCTRL_MAP(MENU_DOWN,		KEY_DOWN),
-	//HSCTRL_MAP(POWER_UP,		KEY_POWER2),
-	//HSCTRL_MAP(RESTART,		KEY_RESTART),
 	// https://github.com/torvalds/linux/blob/d67978318827d06f1c0fa4c31343a279e9df6fde/drivers/hid/hid-input.c#L924
 	// TODO: Need to simulate press up
 	// https://github.com/torvalds/linux/blob/d67978318827d06f1c0fa4c31343a279e9df6fde/drivers/hid/hid-input.c#L1704
