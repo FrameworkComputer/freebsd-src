@@ -567,6 +567,35 @@ static struct hdaa_model_pin_patch_t realtek_model_pin_patches[] = {
 				}
 			}, { }
 		}
+	}, { /**** CODEC: HDA_CODEC_ALC295 ****/
+		.id = HDA_CODEC_ALC295,
+		.patches = (struct model_pin_patch_t[]){
+			{
+				.models = (struct pin_machine_model_t[]){
+					PIN_SUBVENDOR(FRAMEWORK_LAPTOP_0009_SUBVENDOR),
+					{ }
+				},
+				.pin_patches = (struct pin_patch_t[]){
+					PIN_PATCH_JACK_WO_DETECT(25),
+					{ }
+				}
+			}, { }
+		}
+	}, { /**** CODEC: HDA_CODEC_ALC285 ****/
+		.id = HDA_CODEC_ALC285,
+		.patches = (struct model_pin_patch_t[]){
+			{
+				.models = (struct pin_machine_model_t[]){
+					PIN_SUBVENDOR(FRAMEWORK_LAPTOP_0001_SUBVENDOR),
+					PIN_SUBVENDOR(FRAMEWORK_LAPTOP_0006_SUBVENDOR),
+					{ }
+				},
+				.pin_patches = (struct pin_patch_t[]){
+					PIN_PATCH_JACK_WO_DETECT(25),
+					{ }
+				}
+			}, { }
+		}
 	}, { /**** CODEC: HDA_CODEC_ALC286 ****/
 		.id = HDA_CODEC_ALC286,
 		.patches = (struct model_pin_patch_t[]){
