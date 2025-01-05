@@ -577,6 +577,11 @@ static struct hdaa_model_pin_patch_t realtek_model_pin_patches[] = {
 				},
 				.pin_patches = (struct pin_patch_t[]){
 					PIN_PATCH_JACK_WO_DETECT(25),
+					// TODO: This probably doesn't work as it overrides PIN_PATCH_JACK_WO_DETECT
+					// Match jack microphone with internal mic
+					PIN_PATCH_STRING(25, "as=3 seq=15 device=Headphones loc=Left"),
+					// Match jack output with internal speaker
+					PIN_PATCH_STRING(25, "as=1 seq=15 device=Headphones loc=Left"),
 					{ }
 				}
 			}, { }
