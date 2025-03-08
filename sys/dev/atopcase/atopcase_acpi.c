@@ -175,6 +175,7 @@ atopcase_acpi_notify(ACPI_HANDLE h __unused, UINT32 notify __unused, void *ctx)
 	return (0);
 }
 
+// In here we can send the event
 static void
 atopcase_acpi_intr(void *ctx)
 {
