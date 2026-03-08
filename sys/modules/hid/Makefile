@@ -8,6 +8,7 @@ SUBDIR = \
 SUBDIR += \
 	bcm5974 \
 	hconf \
+	hidals \
 	hcons \
 	hgame \
 	hkbd \

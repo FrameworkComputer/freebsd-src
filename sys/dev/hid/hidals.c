@@ -27,6 +27,12 @@
 
 #include <sys/cdefs.h>
 /*
+ * HID Ambient Light Sensor driver.
+ *
+ * Exposes illuminance (and optionally color temperature) from HID sensor
+ * devices via sysctl.  Configurable feature reports (reporting state,
+ * power state, report interval) follow the hconf.c pattern.
+ *
  * HID spec: https://usb.org/sites/default/files/hut1_5.pdf
  * First proposed in HUTRR39: https://www.usb.org/sites/default/files/hutrr39b_0.pdf
  */
@@ -36,72 +42,250 @@
 #include <sys/param.h>
 #include <sys/bus.h>
 #include <sys/kernel.h>
+#include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/module.h>
 #include <sys/sysctl.h>
+#include <sys/systm.h>
+#include <sys/sx.h>
 
-#include <dev/evdev/input.h>
-#include <dev/evdev/evdev.h>
-
+#define	HID_DEBUG_VAR	hidals_debug
 #include <dev/hid/hid.h>
 #include <dev/hid/hidbus.h>
-#include <dev/hid/hidmap.h>
-#include <dev/hid/hidquirk.h>
-#include <dev/hid/hidrdesc.h>
 
-static const uint8_t hidals_boot_desc[] = { HID_MOUSE_BOOTPROTO_DESCR() };
+#ifdef HID_DEBUG
+static int hidals_debug = 0;
 
-enum {
-	HIDALS_ILL,
+static SYSCTL_NODE(_hw_hid, OID_AUTO, hidals, CTLFLAG_RW, 0,
+    "HID Ambient Light Sensor");
+SYSCTL_INT(_hw_hid_hidals, OID_AUTO, debug, CTLFLAG_RWTUN,
+    &hidals_debug, 1, "Debug level");
+#endif
+
+enum hidals_feature {
+	HIDALS_FEAT_REPORTING_STATE = 0,
+	HIDALS_FEAT_POWER_STATE,
+	HIDALS_FEAT_REPORT_INTERVAL,
+	HIDALS_FEAT_COUNT
 };
 
-#define HIDALS_MAP_ABS(usage, code)	\
-	{ HIDMAP_ABS(HUP_SENSORS, usage, code) }
-
-static const struct hidmap_item hidals_map[] = {
-	/**
-	 * Let's keep it as evdev ABS_X right now.
-	 * Later we can change it to a different API.
-	 */
-	[HIDALS_ILL]	= HIDALS_MAP_ABS(HUS_ILLUMINATION,		ABS_X),
+struct hidals_feature_descr {
+	const char	*name;
+	const char	*descr;
+	uint16_t	usage;
+	u_int		value;
 };
 
-/* A match on these entries will load hidals */
+static const struct hidals_feature_descr hidals_feature_descrs[] = {
+	[HIDALS_FEAT_REPORTING_STATE] = {
+		.name = "reporting_state",
+		.descr = "Reporting state: 0=no events, 1=all events, "
+		    "2=threshold events",
+		.usage = HUS_REPORTING_STATE,
+		.value = 1,	/* All events */
+	},
+	[HIDALS_FEAT_POWER_STATE] = {
+		.name = "power_state",
+		.descr = "Power state: 1=D0 (full power), 2=D1 (low power), "
+		    "3=D2, 4=D3, 5=D4 (off)",
+		.usage = HUS_POWER_STATE,
+		.value = 1,	/* D0 full power */
+	},
+	[HIDALS_FEAT_REPORT_INTERVAL] = {
+		.name = "report_interval",
+		.descr = "Report interval in milliseconds",
+		.usage = HUS_REPORT_INTERVAL,
+		.value = 0,	/* Device default */
+	},
+};
+
+struct hidals_feature_control {
+	u_int			val;
+	struct hid_location	loc;
+	hid_size_t		rlen;
+	uint8_t			rid;
+};
+
+struct hidals_softc {
+	device_t		dev;
+	struct sx		lock;
+
+	/* Illuminance input report field */
+	struct hid_location	ill_loc;
+	uint8_t			ill_rid;
+	hid_size_t		ill_rlen;
+
+	/* Color temperature input report field (optional) */
+	struct hid_location	ct_loc;
+	uint8_t			ct_rid;
+	bool			has_ct;
+
+	/* Feature report controls */
+	struct hidals_feature_control features[HIDALS_FEAT_COUNT];
+
+	/* Current sensor readings */
+	int			illuminance;
+	int			color_temperature;
+};
+
 static const struct hid_device_id hidals_devs[] = {
 	{ HID_TLC(HUP_SENSORS, HUS_AMBIENT_LIGHT) },
 };
 
-struct hidals_softc {
-	struct hidmap		hm;
-};
+static int
+hidals_set_feature(struct hidals_softc *sc, int feat_id, u_int val)
+{
+	struct hidals_feature_control *fc;
+	uint8_t *fbuf;
+	int error;
+	int i;
+
+	KASSERT(feat_id >= 0 && feat_id < HIDALS_FEAT_COUNT,
+	    ("impossible feat id %d", feat_id));
+	fc = &sc->features[feat_id];
+	if (fc->rlen <= 1)
+		return (ENXIO);
+
+	fbuf = malloc(fc->rlen, M_TEMP, M_WAITOK | M_ZERO);
+	sx_xlock(&sc->lock);
+
+	/* Set all features sharing this report ID. */
+	bzero(fbuf + 1, fc->rlen - 1);
+	for (i = 0; i < nitems(sc->features); i++) {
+		struct hidals_feature_control *ofc = &sc->features[i];
+
+		if (ofc->rid != fc->rid)
+			continue;
+		KASSERT(fc->rlen == ofc->rlen,
+		    ("different lengths for report %d: %d vs %d\n",
+		    fc->rid, fc->rlen, ofc->rlen));
+		hid_put_udata(fbuf + 1, ofc->rlen - 1, &ofc->loc,
+		    i == feat_id ? val : ofc->val);
+	}
+
+	fbuf[0] = fc->rid;
+
+	error = hid_set_report(sc->dev, fbuf, fc->rlen,
+	    HID_FEATURE_REPORT, fc->rid);
+	if (error == 0)
+		fc->val = val;
+
+	sx_unlock(&sc->lock);
+	free(fbuf, M_TEMP);
+
+	return (error);
+}
+
+static int
+hidals_feature_sysctl(SYSCTL_HANDLER_ARGS)
+{
+	struct hidals_softc *sc = arg1;
+	int feat_id = arg2;
+	struct hidals_feature_control *fc;
+	u_int value;
+	int error;
+
+	if (feat_id < 0 || feat_id >= HIDALS_FEAT_COUNT)
+		return (ENXIO);
+
+	fc = &sc->features[feat_id];
+	value = fc->val;
+	error = sysctl_handle_int(oidp, &value, 0, req);
+	if (error != 0 || req->newptr == NULL)
+		return (error);
+
+	error = hidals_set_feature(sc, feat_id, value);
+	if (error != 0) {
+		DPRINTF("Failed to set %s: %d\n",
+		    hidals_feature_descrs[feat_id].name, error);
+	}
+	return (0);
+}
+
+static int
+hidals_ill_sysctl(SYSCTL_HANDLER_ARGS)
+{
+	struct hidals_softc *sc = arg1;
+	int val;
+
+	val = sc->illuminance;
+	return (sysctl_handle_int(oidp, &val, 0, req));
+}
+
+static int
+hidals_ct_sysctl(SYSCTL_HANDLER_ARGS)
+{
+	struct hidals_softc *sc = arg1;
+	int val;
+
+	val = sc->color_temperature;
+	return (sysctl_handle_int(oidp, &val, 0, req));
+}
 
 static void
-hidals_identify(driver_t *driver, device_t parent)
+hidals_intr(void *context, void *buf, hid_size_t len)
 {
-	const struct hid_device_info *hw = hid_get_device_info(parent);
+	struct hidals_softc *sc = context;
+	uint8_t *data = buf;
 
-	// Only needed if we find a device that needs fixing up
+	if (sc->ill_rid != 0) {
+		if (len < 1 || data[0] != sc->ill_rid)
+			return;
+		sc->illuminance = hid_get_udata(data + 1, len - 1,
+		    &sc->ill_loc);
+	} else {
+		sc->illuminance = hid_get_udata(data, len, &sc->ill_loc);
+	}
+
+	if (sc->has_ct) {
+		if (sc->ct_rid != 0)
+			sc->color_temperature = hid_get_udata(data + 1,
+			    len - 1, &sc->ct_loc);
+		else
+			sc->color_temperature = hid_get_udata(data, len,
+			    &sc->ct_loc);
+	}
+}
+
+static int
+hidals_parse_feature(struct hidals_feature_control *fc, uint8_t tlc_index,
+    uint16_t usage, void *d_ptr, hid_size_t d_len)
+{
+	uint32_t flags;
+
+	if (!hidbus_locate(d_ptr, d_len, HID_USAGE2(HUP_SENSORS, usage),
+	    hid_feature, tlc_index, 0, &fc->loc, &flags, &fc->rid, NULL))
+		return (ENOENT);
+
+	if ((flags & (HIO_VARIABLE | HIO_RELATIVE)) != HIO_VARIABLE)
+		return (EINVAL);
+
+	fc->rlen = hid_report_size(d_ptr, d_len, hid_feature, fc->rid);
+	return (0);
 }
 
 static int
 hidals_probe(device_t dev)
 {
-	struct hidals_softc *sc = device_get_softc(dev);
+	void *d_ptr;
+	hid_size_t d_len;
+	uint8_t tlc_index;
 	int error;
 
 	error = HIDBUS_LOOKUP_DRIVER_INFO(dev, hidals_devs);
 	if (error != 0)
 		return (error);
 
-	hidmap_set_dev(&sc->hm, dev);
-
-	/* Check if report descriptor belongs to an ALS sensor */
-	error = HIDMAP_ADD_MAP(&sc->hm, hidals_map, NULL);
+	error = hid_get_report_descr(dev, &d_ptr, &d_len);
 	if (error != 0)
-		return (error);
+		return (ENXIO);
 
-	/* There should be at least one X or Y axis */
-	if (hidmap_test_cap(sc->caps, HIDALS_ILL))
+	tlc_index = hidbus_get_index(dev);
+
+	/* Require illuminance input field in report descriptor. */
+	if (!hidbus_locate(d_ptr, d_len,
+	    HID_USAGE2(HUP_SENSORS, HUS_ILLUMINATION),
+	    hid_input, tlc_index, 0, NULL, NULL, NULL, NULL))
 		return (ENXIO);
 
 	hidbus_set_desc(dev, "ALS Sensor");
@@ -113,57 +297,88 @@ static int
 hidals_attach(device_t dev)
 {
 	struct hidals_softc *sc = device_get_softc(dev);
-	const struct hid_device_info *hw = hid_get_device_info(dev);
-	struct hidmap_hid_item *hi;
-	HIDMAP_CAPS(cap_wheel, hidals_map_wheel);
+	struct sysctl_ctx_list *ctx = device_get_sysctl_ctx(dev);
+	struct sysctl_oid *tree = device_get_sysctl_tree(dev);
 	void *d_ptr;
 	hid_size_t d_len;
-	bool set_report_proto;
-	int error, nbuttons = 0;
+	uint8_t tlc_index;
+	int error;
+	int i;
 
-	/*
-	 * Set the report (non-boot) protocol if report descriptor has not been
-	 * overloaded with boot protocol report descriptor.
-	 *
-	 * Mice without boot protocol support may choose not to implement
-	 * Set_Protocol at all; Ignore any error.
-	 */
 	error = hid_get_report_descr(dev, &d_ptr, &d_len);
-	set_report_proto = !(error == 0 && d_len == sizeof(hidals_boot_desc) &&
-	    memcmp(d_ptr, hidals_boot_desc, sizeof(hidals_boot_desc)) == 0);
-	(void)hid_set_protocol(dev, set_report_proto ? 1 : 0);
+	if (error) {
+		device_printf(dev, "could not retrieve report descriptor "
+		    "from device: %d\n", error);
+		return (ENXIO);
+	}
 
-	if (hid_test_quirk(hw, HQ_MS_REVZ))
-		HIDMAP_ADD_MAP(&sc->hm, hidals_map_wheel_rev, cap_wheel);
-	else
-		HIDMAP_ADD_MAP(&sc->hm, hidals_map_wheel, cap_wheel);
+	sc->dev = dev;
+	sx_init(&sc->lock, device_get_nameunit(dev));
 
-	if (hid_test_quirk(hw, HQ_MS_VENDOR_BTN))
-		HIDMAP_ADD_MAP(&sc->hm, hidals_map_kensington_slimblade, NULL);
+	tlc_index = hidbus_get_index(dev);
 
-	error = hidmap_attach(&sc->hm);
-	if (error)
-		return (error);
+	/* Locate required illuminance input field. */
+	if (!hidbus_locate(d_ptr, d_len,
+	    HID_USAGE2(HUP_SENSORS, HUS_ILLUMINATION),
+	    hid_input, tlc_index, 0, &sc->ill_loc, NULL, &sc->ill_rid,
+	    NULL)) {
+		device_printf(dev, "could not find illuminance usage\n");
+		sx_destroy(&sc->lock);
+		return (ENXIO);
+	}
+	sc->ill_rlen = hid_report_size(d_ptr, d_len, hid_input, sc->ill_rid);
 
-	/* Count number of input usages of variable type mapped to buttons */
-	for (hi = sc->hm.hid_items;
-	     hi < sc->hm.hid_items + sc->hm.nhid_items;
-	     hi++)
-		if (hi->type == HIDMAP_TYPE_VARIABLE && hi->evtype == EV_KEY)
-			nbuttons++;
+	/* Locate optional color temperature input field. */
+	sc->has_ct = hidbus_locate(d_ptr, d_len,
+	    HID_USAGE2(HUP_SENSORS, HUS_COLOR_TEMPERATURE),
+	    hid_input, tlc_index, 0, &sc->ct_loc, NULL, &sc->ct_rid, NULL);
 
-	/* announce information about the mouse */
-	device_printf(dev, "%d buttons and [%s%s%s%s%s] coordinates ID=%u\n",
-	    nbuttons,
-	    (hidmap_test_cap(sc->caps, HMS_REL_X) ||
-	     hidmap_test_cap(sc->caps, HMS_ABS_X)) ? "X" : "",
-	    (hidmap_test_cap(sc->caps, HMS_REL_Y) ||
-	     hidmap_test_cap(sc->caps, HMS_ABS_Y)) ? "Y" : "",
-	    (hidmap_test_cap(sc->caps, HMS_REL_Z) ||
-	     hidmap_test_cap(sc->caps, HMS_ABS_Z)) ? "Z" : "",
-	    hidmap_test_cap(cap_wheel, 0) ? "W" : "",
-	    hidmap_test_cap(sc->caps, HMS_HWHEEL) ? "H" : "",
-	    sc->hm.hid_items[0].id);
+	/* Parse optional feature report fields. */
+	for (i = 0; i < nitems(sc->features); i++) {
+		(void)hidals_parse_feature(&sc->features[i], tlc_index,
+		    hidals_feature_descrs[i].usage, d_ptr, d_len);
+		sc->features[i].val = hidals_feature_descrs[i].value;
+	}
+
+	/* Register interrupt handler. */
+	hidbus_set_intr(dev, hidals_intr, sc);
+
+	/* Create sysctl nodes for sensor readings. */
+	SYSCTL_ADD_PROC(ctx, SYSCTL_CHILDREN(tree), OID_AUTO,
+	    "illuminance", CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_MPSAFE,
+	    sc, 0, hidals_ill_sysctl, "I", "Illuminance in lux");
+
+	if (sc->has_ct) {
+		SYSCTL_ADD_PROC(ctx, SYSCTL_CHILDREN(tree), OID_AUTO,
+		    "color_temperature",
+		    CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_MPSAFE,
+		    sc, 0, hidals_ct_sysctl, "I",
+		    "Color temperature in Kelvin");
+	}
+
+	/* Create sysctl nodes for feature report controls. */
+	for (i = 0; i < nitems(sc->features); i++) {
+		if (sc->features[i].rlen > 1) {
+			SYSCTL_ADD_PROC(ctx, SYSCTL_CHILDREN(tree), OID_AUTO,
+			    hidals_feature_descrs[i].name,
+			    CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_MPSAFE,
+			    sc, i, hidals_feature_sysctl, "IU",
+			    hidals_feature_descrs[i].descr);
+		}
+	}
+
+	/* Configure initial sensor state. */
+	for (i = 0; i < nitems(sc->features); i++) {
+		if (sc->features[i].rlen <= 1)
+			continue;
+		if (sc->features[i].val == 0)
+			continue;
+		error = hidals_set_feature(sc, i, sc->features[i].val);
+		if (error != 0) {
+			DPRINTF("Failed to set initial %s: %d\n",
+			    hidals_feature_descrs[i].name, error);
+		}
+	}
 
 	return (0);
 }
@@ -172,26 +387,47 @@ static int
 hidals_detach(device_t dev)
 {
 	struct hidals_softc *sc = device_get_softc(dev);
-	int error;
 
-	error = hidmap_detach(&sc->hm);
-	return (error);
+	sx_destroy(&sc->lock);
+
+	return (0);
+}
+
+static int
+hidals_resume(device_t dev)
+{
+	struct hidals_softc *sc = device_get_softc(dev);
+	int error;
+	int i;
+
+	for (i = 0; i < nitems(sc->features); i++) {
+		if (sc->features[i].rlen < 2)
+			continue;
+		if (sc->features[i].val == hidals_feature_descrs[i].value)
+			continue;
+		error = hidals_set_feature(sc, i, sc->features[i].val);
+		if (error != 0) {
+			DPRINTF("Failed to restore %s: %d\n",
+			    hidals_feature_descrs[i].name, error);
+		}
+	}
+
+	return (0);
 }
 
 static device_method_t hidals_methods[] = {
-	DEVMETHOD(device_identify,	hidals_identify),
 	DEVMETHOD(device_probe,		hidals_probe),
 	DEVMETHOD(device_attach,	hidals_attach),
 	DEVMETHOD(device_detach,	hidals_detach),
+	DEVMETHOD(device_resume,	hidals_resume),
 
 	DEVMETHOD_END
 };
 
-DEFINE_CLASS_0(hidals, hidals_driver, hidals_methods, sizeof(struct hidals_softc));
+DEFINE_CLASS_0(hidals, hidals_driver, hidals_methods,
+    sizeof(struct hidals_softc));
 DRIVER_MODULE(hidals, hidbus, hidals_driver, NULL, NULL);
-MODULE_DEPEND(hidals, hid, 1, 1, 1);
 MODULE_DEPEND(hidals, hidbus, 1, 1, 1);
-MODULE_DEPEND(hidals, hidmap, 1, 1, 1);
-MODULE_DEPEND(hidals, evdev, 1, 1, 1);
+MODULE_DEPEND(hidals, hid, 1, 1, 1);
 MODULE_VERSION(hidals, 1);
 HID_PNP_INFO(hidals_devs);
