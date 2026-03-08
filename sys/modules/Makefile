@@ -23,6 +23,7 @@ SUBDIR=	\
 	acl_nfs4 \
 	acl_posix1e \
 	${_acpi} \
+	${_acpi_soc_button} \
 	ae \
 	${_aesni} \
 	age \
@@ -399,6 +400,7 @@ SUBDIR=	\
 	tarfs \
 	tcp \
 	${_thunderbolt} \
+	${_tglgpio} \
 	${_ti} \
 	tmpfs \
 	${_toecore} \
@@ -806,6 +808,8 @@ _blake2=	blake2
 .endif
 _bytgpio=	bytgpio
 _chvgpio=	chvgpio
+_tglgpio=	tglgpio
+_acpi_soc_button=	acpi_soc_button
 _ciss=		ciss
 _chromebook_platform=	chromebook_platform
 _coretemp=	coretemp
